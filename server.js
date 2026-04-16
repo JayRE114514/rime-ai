@@ -6,7 +6,7 @@ import { writeFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { exec } from 'child_process';
-import config, { reloadConfig } from './config.js';
+import state, { reloadConfig } from './config.js';
 import { startVoice, stopVoice } from './voice.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -22,7 +22,7 @@ configApp.use(express.static(join(__dirname, 'public')));
 // 配置 API
 configApp.get('/api/config', (req, res) => {
   // apiKey 脱敏
-  const safeConfig = JSON.parse(JSON.stringify(config));
+  const safeConfig = JSON.parse(JSON.stringify(state.config));
   if (safeConfig.llm.apiKey) {
     safeConfig.llm.apiKey = safeConfig.llm.apiKey.slice(0, 4) + '****';
   }
@@ -37,10 +37,10 @@ configApp.post('/api/config', (req, res) => {
 
   // 如果 apiKey 是脱敏值，保留原值
   if (newConfig.llm?.apiKey?.endsWith('****')) {
-    newConfig.llm.apiKey = config.llm.apiKey;
+    newConfig.llm.apiKey = state.config.llm.apiKey;
   }
   if (newConfig.stt?.apiKey?.endsWith('****')) {
-    newConfig.stt.apiKey = config.stt.apiKey;
+    newConfig.stt.apiKey = state.config.stt.apiKey;
   }
 
   // 写入 config.yaml
@@ -71,13 +71,14 @@ configApp.post('/api/restart', (req, res) => {
 
 // LLM 客户端
 let openai = new OpenAI({
-  baseURL: config.llm.baseURL,
-  apiKey: config.llm.apiKey,
+  baseURL: state.config.llm.baseURL,
+  apiKey: state.config.llm.apiKey,
 });
 
 // 防抖 + AbortController 状态
 let debounceTimer = null;
 let currentController = null;
+let pendingRes = null;
 
 app.post('/complete', (req, res) => {
   const { context, pinyin } = req.body;
@@ -91,6 +92,12 @@ app.post('/complete', (req, res) => {
     currentController.abort();
   }
 
+  // 关闭上一个悬挂的 res
+  if (pendingRes && !pendingRes.headersSent) {
+    pendingRes.status(499).end();
+  }
+  pendingRes = res;
+
   // 清除上一次防抖定时器
   clearTimeout(debounceTimer);
 
@@ -101,7 +108,7 @@ app.post('/complete', (req, res) => {
     try {
       const stream = await openai.chat.completions.create(
         {
-          model: config.llm.model,
+          model: state.config.llm.model,
           messages: [
             {
               role: 'system',
@@ -128,18 +135,18 @@ app.post('/complete', (req, res) => {
         }
       }
       res.end();
+      pendingRes = null;
     } catch (err) {
       if (err.name === 'AbortError') {
-        // 被新请求取消，静默关闭
-        if (!res.headersSent) res.status(499).end();
         return;
       }
+      pendingRes = null;
       console.error('LLM error:', err.message);
       if (!res.headersSent) {
         res.status(500).json({ error: err.message });
       }
     }
-  }, config.llm.debounceMs);
+  }, state.config.llm.debounceMs);
 });
 
 app.get('/health', (req, res) => {
@@ -147,8 +154,8 @@ app.get('/health', (req, res) => {
 });
 
 // 启动 LLM 服务
-const server = app.listen(config.server.port, () => {
-  console.log(`✅ LLM 服务运行在 http://localhost:${config.server.port}`);
+const server = app.listen(state.config.server.port, () => {
+  console.log(`✅ LLM 服务运行在 http://localhost:${state.config.server.port}`);
 
   // 启动语音模块
   try {
@@ -159,21 +166,25 @@ const server = app.listen(config.server.port, () => {
 });
 
 // 启动配置页服务
-const configServer = configApp.listen(config.server.configPort, () => {
-  console.log(`✅ 配置页运行在 http://localhost:${config.server.configPort}`);
+const configServer = configApp.listen(state.config.server.configPort, () => {
+  console.log(`✅ 配置页运行在 http://localhost:${state.config.server.configPort}`);
 });
 
 // 系统托盘
 function initTray() {
   import('systray2').then((mod) => {
-    const SysTray = mod.default.default || mod.default;
+    const SysTray = mod.default?.default || mod.default;
+    if (typeof SysTray !== 'function') {
+      console.log('⚠️ 系统托盘不可用: SysTray 不是构造函数');
+      return;
+    }
     const itemOpenConfig = {
       title: '打开配置页',
       tooltip: '在浏览器中打开配置页面',
       checked: false,
       enabled: true,
       click: () => {
-        const url = `http://localhost:${config.server.configPort}`;
+        const url = `http://localhost:${state.config.server.configPort}`;
         exec(`start ${url}`, { windowsHide: true });
       },
     };

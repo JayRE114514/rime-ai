@@ -4,7 +4,7 @@ import recorder from 'node-record-lpcm16';
 import OpenAI from 'openai';
 import { execSync } from 'child_process';
 import { Writable } from 'stream';
-import config from './config.js';
+import state from './config.js';
 
 let recording = null;
 let audioChunks = [];
@@ -78,8 +78,8 @@ async function stopRecording() {
     const file = new File([audioBuffer], 'audio.wav', { type: 'audio/wav' });
     const transcription = await groq.audio.transcriptions.create({
       file,
-      model: config.stt.model,
-      language: config.stt.language,
+      model: state.config.stt.model,
+      language: state.config.stt.language,
     });
 
     const text = transcription.text;
@@ -94,9 +94,9 @@ async function stopRecording() {
 
 // 模拟键盘输入文字（Windows）
 function typeText(text) {
-  // Windows: 使用 PowerShell SendKeys
+  // 先写入剪贴板，再 Ctrl+V 粘贴（SendKeys 不支持中文）
   const escaped = text.replace(/'/g, "''");
-  const cmd = `powershell -Command "Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('${escaped}');"`;
+  const cmd = `powershell -Command "Set-Clipboard '${escaped}'; Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SendKeys]::SendWait('^v');"`;
   try {
     execSync(cmd, { windowsHide: true });
   } catch (err) {
@@ -105,17 +105,17 @@ function typeText(text) {
 }
 
 export function startVoice() {
-  if (!config.stt.enabled) {
+  if (!state.config.stt.enabled) {
     console.log('⚠️ 语音输入已禁用');
     return;
   }
 
   groq = new OpenAI({
-    baseURL: config.stt.baseURL,
-    apiKey: config.stt.apiKey,
+    baseURL: state.config.stt.baseURL,
+    apiKey: state.config.stt.apiKey,
   });
 
-  const hotkeyConfig = parseHotkey(config.stt.hotkey);
+  const hotkeyConfig = parseHotkey(state.config.stt.hotkey);
 
   uIOhook.on('keydown', (e) => {
     if (isHotkey(e, hotkeyConfig)) {
@@ -130,7 +130,7 @@ export function startVoice() {
   });
 
   uIOhook.start();
-  console.log(`✅ 语音输入已启动（快捷键：${config.stt.hotkey}）`);
+  console.log(`✅ 语音输入已启动（快捷键：${state.config.stt.hotkey}）`);
 }
 
 export function stopVoice() {
