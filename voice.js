@@ -1,15 +1,18 @@
 // voice.js - 语音输入模块
 import { uIOhook, UiohookKey } from 'uiohook-napi';
-import recorder from 'node-record-lpcm16';
+import { createRequire } from 'module';
 import OpenAI from 'openai';
 import { execSync } from 'child_process';
-import { Writable } from 'stream';
 import state from './config.js';
 
-let recording = null;
+const require = createRequire(import.meta.url);
+const Decibri = require('decibri');
+
+let mic = null;
 let audioChunks = [];
 let isRecording = false;
 let groq = null;
+let micAvailable = true;
 
 // 解析 hotkey 字符串为键码配置
 function parseHotkey(hotkeyStr) {
@@ -35,47 +38,71 @@ function isHotkey(event, hotkeyConfig) {
   return event.keycode === targetKeycode;
 }
 
+// 构造 44 字节标准 WAV 文件头（16kHz, 16-bit, mono）
+function buildWavHeader(dataLength) {
+  const header = Buffer.alloc(44);
+  const sampleRate = 16000;
+  const channels = 1;
+  const bitsPerSample = 16;
+  const byteRate = sampleRate * channels * bitsPerSample / 8;
+  const blockAlign = channels * bitsPerSample / 8;
+
+  header.write('RIFF', 0);                        // ChunkID
+  header.writeUInt32LE(36 + dataLength, 4);        // ChunkSize
+  header.write('WAVE', 8);                         // Format
+  header.write('fmt ', 12);                        // Subchunk1ID
+  header.writeUInt32LE(16, 16);                    // Subchunk1Size (PCM)
+  header.writeUInt16LE(1, 20);                     // AudioFormat (PCM=1)
+  header.writeUInt16LE(channels, 22);              // NumChannels
+  header.writeUInt32LE(sampleRate, 24);             // SampleRate
+  header.writeUInt32LE(byteRate, 28);               // ByteRate
+  header.writeUInt16LE(blockAlign, 32);             // BlockAlign
+  header.writeUInt16LE(bitsPerSample, 34);          // BitsPerSample
+  header.write('data', 36);                        // Subchunk2ID
+  header.writeUInt32LE(dataLength, 40);             // Subchunk2Size
+
+  return header;
+}
+
 function startRecording() {
-  if (isRecording) return;
+  if (isRecording || !micAvailable) return;
   isRecording = true;
   audioChunks = [];
 
-  recording = recorder.record({
-    sampleRate: 16000,
-    channels: 1,
-    recorder: 'sox',
-    audioType: 'wav',
-  });
-
-  recording.stream().pipe(
-    new Writable({
-      write(chunk, encoding, callback) {
-        audioChunks.push(chunk);
-        callback();
-      },
-    })
-  );
-
-  console.log('🎤 开始录音...');
+  try {
+    mic = new Decibri({ sampleRate: 16000, channels: 1 });
+    mic.on('data', (chunk) => {
+      audioChunks.push(chunk);
+    });
+    mic.on('error', (err) => {
+      console.error('录音错误:', err.message);
+    });
+    console.log('🎤 开始录音...');
+  } catch (err) {
+    console.error('⚠️ 麦克风初始化失败:', err.message);
+    micAvailable = false;
+    isRecording = false;
+  }
 }
 
 async function stopRecording() {
-  if (!isRecording || !recording) return;
+  if (!isRecording || !mic) return;
   isRecording = false;
-  recording.stop();
-  recording = null;
+  mic.stop();
+  mic = null;
 
   console.log('🎤 录音结束，正在转写...');
 
-  // 将音频 buffer 发送给 Groq Whisper
-  const audioBuffer = Buffer.concat(audioChunks);
-  if (audioBuffer.length === 0) {
+  // 将 PCM chunks 拼接并加上 WAV header
+  const pcmData = Buffer.concat(audioChunks);
+  if (pcmData.length === 0) {
     console.log('音频为空，跳过');
     return;
   }
+  const wavBuffer = Buffer.concat([buildWavHeader(pcmData.length), pcmData]);
 
   try {
-    const file = new File([audioBuffer], 'audio.wav', { type: 'audio/wav' });
+    const file = new File([wavBuffer], 'audio.wav', { type: 'audio/wav' });
     const transcription = await groq.audio.transcriptions.create({
       file,
       model: state.config.stt.model,
@@ -134,9 +161,9 @@ export function startVoice() {
 }
 
 export function stopVoice() {
-  if (isRecording && recording) {
-    recording.stop();
-    recording = null;
+  if (isRecording && mic) {
+    mic.stop();
+    mic = null;
     isRecording = false;
   }
   try {
