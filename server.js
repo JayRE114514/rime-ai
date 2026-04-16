@@ -63,6 +63,16 @@ configApp.post('/api/config', (req, res) => {
   res.json({ status: 'ok' });
 });
 
+configApp.get('/api/health', async (req, res) => {
+  try {
+    const resp = await fetch(`http://localhost:${state.config.server.port}/health`);
+    const data = await resp.json();
+    res.json(data);
+  } catch (e) {
+    res.json({ status: 'error' });
+  }
+});
+
 configApp.post('/api/restart', (req, res) => {
   stopVoice();
   try { startVoice(); } catch (e) { /* ignore */ }

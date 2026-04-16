@@ -158,7 +158,7 @@
     async function checkHealth() {
       const el = document.getElementById('status');
       try {
-        const res = await fetch('http://localhost:3001/health');
+        const res = await fetch('/api/health');
         const data = await res.json();
         if (data.status === 'ok') {
           el.textContent = 'LLM 服务状态：正常运行';
